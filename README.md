@@ -163,10 +163,10 @@ Contributions are welcome—especially improvements to robustness, usability, an
 
 ## License
 
-Add your preferred license (e.g., MIT, BSD-3, GPL) in a `LICENSE` file. Until then, treat as **all rights reserved** by default.
+The users of this software are bound to a MIT LICENSE, **all rights reserved**.
 
 ---
 
 ## Acknowledgements
 
-- Bézier curve methods and morphometric ratio conventions inspired by fin-shape workflow practices (including Weller-style ratios).
+- Fin-shape workflow practices for morphometric ratio conventions are inspired by both Weller's (1998) ratios and  Bézier curve methods by Morteo et al. (2017).
