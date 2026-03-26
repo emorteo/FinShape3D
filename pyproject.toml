@@ -25,6 +25,9 @@ dev = [
     "mypy"
 ]
 
+[project.urls]
+Homepage = "https://github.com/yourorg/FinShape3D"
+
 [tool.ruff]
 line-length = 120
 

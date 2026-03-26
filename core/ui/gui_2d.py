@@ -51,6 +51,29 @@ from core.math.bezier import bezier_quad, bezier_cubic, sample_curve
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
+import os
+import subprocess
+import platform
+import pandas as pd
+import shutil
+import webbrowser
+
+from core.reconstruction.wireframe import build_landmarks, build_controls, compute_2d_curves
+from core.ui.plotting_3d import plot_2d, plot_3d_wireframe
+
+
+"""Graphical user interface for FinShape2D morphometry.
+
+The `FinShape2DApp` class provides an interactive Tk-based workflow for
+landmarking a dorsal fin image, fitting Bézier controls, saving morphometric
+ratios to CSV, and invoking the FinShape3D reconstruction pipeline.
+
+Design notes for contributors:
+- Landmarks are collected in the order: B → A → C30 → C20 → C10 → C5 → D
+- `save_measurement()` writes a CSV row compatible with FinShape3D's
+    `build_landmarks` by including either r_* ratios or C*B_over_AB variants.
+- `generate_3d()` builds a pandas Series and calls the reconstruction API.
+"""
 
 
 
@@ -110,6 +133,13 @@ class BezierControls:
 
 
 def build_initial_controls(lm: Landmarks) -> BezierControls:
+    """Generate default Bézier controls from user-placed landmarks.
+
+    This provides a reasonable initial fit so users can fine-tune the
+    control points interactively. The function returns a `BezierControls`
+    dataclass with named control points for the leading and trailing edges.
+    """
+
     A, B, D = lm.A, lm.B, lm.D
     C5, C10, C20, C30 = lm.C5, lm.C10, lm.C20, lm.C30
 
@@ -151,6 +181,11 @@ def build_initial_controls(lm: Landmarks) -> BezierControls:
 
 
 def curves_from_controls(ctrl: BezierControls, n_per_seg: int = 320) -> Dict[str, List[Tuple[float, float]]]:
+    """Sample the tuple-based Bézier control points into polyline segments.
+
+    Returns a dict mapping segment names to lists of (x,y) tuples usable for
+    drawing on the Tkinter canvas.
+    """
     le0 = sample_curve(lambda t: bezier_quad(ctrl.LE0_Q0, ctrl.LE0_Q1, ctrl.LE0_Q2, t), n_per_seg)
     le1 = sample_curve(lambda t: bezier_cubic(ctrl.LE1_P0, ctrl.LE1_P1, ctrl.LE1_P2, ctrl.LE1_P3, t), n_per_seg)
     te1 = sample_curve(lambda t: bezier_cubic(ctrl.TE1_P0, ctrl.TE1_P1, ctrl.TE1_P2, ctrl.TE1_P3, t), n_per_seg)
@@ -160,6 +195,12 @@ def curves_from_controls(ctrl: BezierControls, n_per_seg: int = 320) -> Dict[str
 
 
 def outline_polygon(ctrl: BezierControls, n_per_seg: int = 500) -> List[Tuple[float, float]]:
+    """Return a continuous polygon outlining the fin contour.
+
+    The ordering stitches leading and trailing edge segments and removes
+    duplicated junction points so the returned list is suitable for area
+    computations and continuous drawing.
+    """
     c = curves_from_controls(ctrl, n_per_seg)
     le0 = c["LE0"]
     le1 = c["LE1"][1:]
@@ -237,13 +278,14 @@ def rotate_and_orient_swim_right(
 
 class FinShape2DApp(tk.Tk):
     CSV_COLUMNS = [
-        "image_name",
+        "id",
+        "r_BA",
+        "r_BC5",
+        "r_BC10",
+        "r_BC20",
+        "r_BC30",
         "AB_px",
         "area_px2",
-        "C5B_over_AB",
-        "C10B_over_AB",
-        "C20B_over_AB",
-        "C30B_over_AB",
         "DB_over_AB",
         "A_dx", "A_dy",
         "C5_dx", "C5_dy",
@@ -251,6 +293,7 @@ class FinShape2DApp(tk.Tk):
         "C20_dx", "C20_dy",
         "C30_dx", "C30_dy",
         "D_dx", "D_dy",
+        "image_name",
     ]
 
     def __init__(self):
@@ -333,6 +376,8 @@ class FinShape2DApp(tk.Tk):
         self.btn_set_landmarks.pack(side="left", padx=4, pady=3)
         self.btn_save_meas = tk.Button(row2, text="8. Save Measurement (CSV)", command=self.save_measurement)
         self.btn_save_meas.pack(side="left", padx=4, pady=3)
+        self.btn_gen_3d = tk.Button(row2, text="8.1 Generate 3D", command=self.generate_3d, state="disabled")
+        self.btn_gen_3d.pack(side="left", padx=4, pady=3)
         self.btn_show2d = tk.Button(row2, text="9. Show 2D", command=self.show_2d_window, state="disabled")
         self.btn_show2d.pack(side="left", padx=4, pady=3)
         self.btn_new_image = tk.Button(row2, text="10. Measure new image", command=self.measure_new_image)
@@ -400,6 +445,9 @@ class FinShape2DApp(tk.Tk):
         for w in [getattr(self, "btn_set_landmarks", None), getattr(self, "btn_save_meas", None)]:
             if w is not None:
                 w.configure(state=("disabled" if locked else "normal"))
+
+        if getattr(self, "btn_gen_3d", None) is not None:
+            self.btn_gen_3d.configure(state=("normal" if locked else "disabled"))
 
         if getattr(self, "btn_show2d", None) is not None:
             self.btn_show2d.configure(state=("normal" if locked else "disabled"))
@@ -753,13 +801,19 @@ class FinShape2DApp(tk.Tk):
         def rel(p): return (p[0]-Bx, p[1]-By)
 
         row: Dict[str, str] = {k: "" for k in self.CSV_COLUMNS}
+        # `id` is the image stem (FinShape3D expects this as the primary identifier)
+        row["id"] = self.image_path.stem if self.image_path else ""
         row["image_name"] = self.image_path.name if self.image_path else ""
         row["AB_px"] = f"{ratios['AB_px']:.6f}"
         row["area_px2"] = f"{area_px2:.6f}"
-        row["C5B_over_AB"]  = f"{ratios['C5B_over_AB']:.10f}"
-        row["C10B_over_AB"] = f"{ratios['C10B_over_AB']:.10f}"
-        row["C20B_over_AB"] = f"{ratios['C20B_over_AB']:.10f}"
-        row["C30B_over_AB"] = f"{ratios['C30B_over_AB']:.10f}"
+        
+        # Calculate ratios relative to BC30 for FinShape3D compatibility
+        BC30 = dist(lm.C30, lm.B)
+        row["r_BA"]   = f"{ratios['AB_px'] / BC30:.10f}"
+        row["r_BC5"]  = f"{dist(lm.C5, lm.B) / BC30:.10f}"
+        row["r_BC10"] = f"{dist(lm.C10, lm.B) / BC30:.10f}"
+        row["r_BC20"] = f"{dist(lm.C20, lm.B) / BC30:.10f}"
+        row["r_BC30"] = f"{1.0:.10f}"
         row["DB_over_AB"]   = f"{ratios['DB_over_AB']:.10f}"
 
         Ax, Ay = rel(lm.A); row["A_dx"], row["A_dy"] = f"{Ax:.6f}", f"{Ay:.6f}"
@@ -782,6 +836,129 @@ class FinShape2DApp(tk.Tk):
         if self.csv_path is not None:
             self._write_csv()
         self.destroy()
+
+    def generate_3d(self):
+        if not getattr(self, 'locked_after_save', False):
+            messagebox.showinfo('Not ready', 'Save Measurement (CSV) first.')
+            return
+        if self.controls is None or "B" not in self.landmarks or "A" not in self.landmarks or "C30" not in self.landmarks:
+            messagebox.showwarning("Not ready", "Need fitted controls and landmarks B, A, C30.")
+            return
+
+        # Prepare data for 3D reconstruction
+        lm = Landmarks(
+            A=self.landmarks["A"], B=self.landmarks["B"],
+            C5=self.landmarks["C5"], C10=self.landmarks["C10"],
+            C20=self.landmarks["C20"], C30=self.landmarks["C30"],
+            D=self.landmarks["D"]
+        )
+        ratios = compute_weller_ratios(lm)
+        
+        # Create a pandas Series with the ratios
+        row = pd.Series({
+            "C30B_over_AB": ratios["C30B_over_AB"],
+            "C5B_over_AB": ratios["C5B_over_AB"],
+            "C10B_over_AB": ratios["C10B_over_AB"],
+            "C20B_over_AB": ratios["C20B_over_AB"],
+            "id": self.image_path.stem if self.image_path else "fin"
+        })
+        
+        # Reconstruct
+        from core.reconstruction.wireframe import build_landmarks as build_landmarks_3d
+        lm_3d, u_AB = build_landmarks_3d(row, BC30_scale=10.0)
+        # Prefer the user-placed AB direction to preserve orientation (flip/rotate)
+        # Convert GUI tuple-based vector to numpy for build_controls
+        try:
+            import numpy as _np
+            from core.math.geometry import v_sub, v_norm
+            # GUI landmarks are in image pixel coords (y increases downwards).
+            # Convert the AB vector to FinShape's y-up convention by flipping y.
+            u_ab_gui = v_norm(v_sub(self.landmarks["A"], self.landmarks["B"]))
+            u_ab_gui = (float(u_ab_gui[0]), float(-u_ab_gui[1]))
+            # Ensure unit-length numpy vector
+            arr = _np.array([u_ab_gui[0], u_ab_gui[1]], dtype=float)
+            nrm = float(_np.linalg.norm(arr))
+            if nrm <= 1e-12:
+                raise ValueError("Degenerate AB vector from GUI landmarks")
+            u_AB_np = arr / nrm
+        except Exception:
+            # fallback to the normalized direction returned by build_landmarks
+            u_AB_np = u_AB
+        try:
+            ctrl_3d = build_controls(lm_3d, u_AB_np)
+        except Exception as e:
+            messagebox.showerror(
+                "3D generation failed",
+                f"Failed to build 3D controls: {e}\n\n"
+                "This may be caused by invalid ratios or a CSV column ordering mismatch.\n"
+                f"Row used for reconstruction: {row.to_dict()}"
+            )
+            return
+        curves2d = compute_2d_curves(ctrl_3d, n=900)
+
+        # Plot: save both 2D and 3D outputs to match Eduardo's original pipeline
+        outdir = self.image_path.parent / "FinShape3D_outputs"
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        # Use the same naming pattern as the standalone FinShape3D script
+        try:
+            from core.ui import plotting_3d as _plotting
+            ver = getattr(_plotting, 'VERSION', '')
+        except Exception:
+            ver = ''
+
+        fin_id = self.image_path.stem if self.image_path else 'fin'
+        p2d = outdir / f"FinShape3D_{ver}_2D_{fin_id}.png" if ver else outdir / f"{fin_id}_2D.png"
+        p3d = outdir / f"FinShape3D_{ver}_3D_{fin_id}.png" if ver else outdir / f"{fin_id}_3D.png"
+
+        # 2D contour (annotated) and 3D wireframe
+        try:
+            # build a landmarks dict expected by plot_2d
+            lm_dict = {
+                'B': lm_3d['B'], 'A': lm_3d['A'], 'C5': lm_3d['C5'],
+                'C10': lm_3d['C10'], 'C20': lm_3d['C20'], 'C30': lm_3d['C30'],
+            }
+            plot_2d(curves2d, lm_dict, ctrl_3d, fin_id, p2d, legend_anchor_xy=(-4.0, 4.0))
+        except Exception as e:
+            # Non-fatal: warn but continue to attempt 3D
+            messagebox.showwarning("2D plot failed", f"Failed to save 2D contour: {e}")
+
+        try:
+            plot_3d_wireframe(curves2d, fin_id, p3d)
+        except Exception as e:
+            messagebox.showerror("3D generation failed", f"Failed to build 3D wireframe: {e}")
+            return
+
+        # Create a small montage of the outputs (2D + 3D) when possible
+        try:
+            from core.ui.plotting_3d import make_montage
+            mont = outdir / f"FinShape3D_{ver}_montage_{fin_id}.png" if ver else outdir / f"{fin_id}_montage.png"
+            imgs = [p for p in (p2d, p3d) if p.exists()]
+            if imgs:
+                make_montage(imgs, mont, title=f"FinShape3D {ver} — {fin_id}" if ver else None)
+        except Exception:
+            mont = None
+
+        # Open the 3D image (previous behaviour) or montage if available
+        to_open = mont if (mont and mont.exists()) else p3d
+        try:
+            if platform.system() == "Darwin":
+                subprocess.call(["open", str(to_open)])
+            elif platform.system() == "Windows":
+                os.startfile(str(to_open))
+            else:
+                opener = shutil.which("xdg-open")
+                if opener:
+                    subprocess.call([opener, str(to_open)])
+                else:
+                    try:
+                        webbrowser.open(to_open.as_uri())
+                    except Exception:
+                        messagebox.showinfo("3D generated", f"Saved: {to_open}\nOpen it manually.")
+        except FileNotFoundError:
+            messagebox.showinfo("Open failed", f"Saved: {to_open}\nCould not open automatically (xdg-open not found).")
+
+        self.status.set(f"3D generated: {p3d.name}")
 
     def show_2d_window(self):
         if not getattr(self, 'locked_after_save', False):
@@ -1159,20 +1336,13 @@ class FinShape2DApp(tk.Tk):
                 cx, cy = p[0] * self.display_scale, p[1] * self.display_scale
                 r = 4
                 self.canvas.create_rectangle(cx - r, cy - r, cx + r, cy + r, fill="#ff9800", outline="", tags=("handle", field))
-            curves = curves_from_controls(self.controls, n_per_seg=240)
-
-            def draw_poly(pts, col):
-                for i in range(len(pts) - 1):
-                    x0, y0 = pts[i]; x1, y1 = pts[i + 1]
-                    self.canvas.create_line(x0 * self.display_scale, y0 * self.display_scale,
-                                            x1 * self.display_scale, y1 * self.display_scale,
-                                            fill=col, width=2)
-
-            draw_poly(curves["LE0"], "#00ff6a")
-            draw_poly(curves["LE1"], "#00ff6a")
-            draw_poly(curves["TE1"], "#ff5252")
-            draw_poly(curves["TE2"], "#ff5252")
-            draw_poly(curves["TE3"], "#ff5252")
+            # Draw a single continuous outline to ensure segment endpoints match exactly.
+            poly = outline_polygon(self.controls, n_per_seg=600)
+            for i in range(len(poly) - 1):
+                x0, y0 = poly[i]; x1, y1 = poly[i + 1]
+                self.canvas.create_line(x0 * self.display_scale, y0 * self.display_scale,
+                                        x1 * self.display_scale, y1 * self.display_scale,
+                                        fill="black", width=2)
 
 
 def main():

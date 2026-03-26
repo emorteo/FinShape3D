@@ -1,3 +1,20 @@
+"""3D wireframe reconstruction utilities.
+
+This module provides functions to build normalized landmark positions from
+ratio tables and to assemble Bézier controls suitable for 3D reconstruction
+and plotting. Public API highlights:
+
+- `build_landmarks(row, BC30_scale)`: construct normalized landmark coords
+    from a pandas Series containing either r_* ratios (relative to BC30) or
+    C*B_over_AB ratios (relative to AB).
+- `build_controls(lm, u_AB)`: derive control points for Bézier segments from
+    normalized landmarks and a unit AB direction vector.
+- `compute_2d_curves(ctrl, n)`: sample the Bézier segments for plotting.
+
+Functions raise informative ValueError when input ratios would produce
+geometrically invalid control points (e.g. invalid ordering or degeneracy).
+"""
+
 import math
 import numpy as np
 import pandas as pd
@@ -8,6 +25,11 @@ from core.io.data_loader import get_any
 
 # 3D thickness model
 def morteo_SP_T(C: float) -> Tuple[float, float]:
+    """Return SP and T thickness model parameters for chord length C.
+
+    The empirical linear relations were derived from morphometric fits and
+    are used to parameterize section thickness models.
+    """
     SP = 0.4357 * C - 1.8803
     T = 0.1191 * C + 0.5164
     return SP, T
@@ -16,6 +38,12 @@ def clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 def thickness_piecewise(c: np.ndarray, C: float, SP: float, T: float) -> np.ndarray:
+    """Piecewise thickness profile for normalized chord positions.
+
+    c : array-like of chordwise coordinates
+    C, SP, T : model parameters (see `morteo_SP_T`).
+    Returns per-position thickness, clipped to zero.
+    """
     c = np.asarray(c, float)
     out = np.zeros_like(c)
 
@@ -35,6 +63,12 @@ def thickness_piecewise(c: np.ndarray, C: float, SP: float, T: float) -> np.ndar
     return out
 
 def invert_thickness_for_c(target: float, C: float, SP: float, T: float) -> Optional[Tuple[float, float]]:
+    """Invert the thickness model to find chordwise locations corresponding
+    to a target thickness value.
+
+    Returns a tuple (cL, cR) with left and right chord abscissae, or None when
+    inversion is impossible for the provided parameters.
+    """
     if target < 1e-12:
         return 0.0, C
     if target > T - 1e-12:
@@ -59,6 +93,12 @@ def invert_thickness_for_c(target: float, C: float, SP: float, T: float) -> Opti
 
 # Landmarks (normalized)
 def build_landmarks(row: pd.Series, BC30_scale: float = 10.0) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+    """Construct normalized 2D landmark coordinates from a ratios row.
+
+    The function accepts either the r_* columns (ratios relative to BC30)
+    or columns named like `C30B_over_AB` (ratios of C*B distances over AB).
+    Returns a dict of numpy arrays for landmarks and the unit vector `u_AB`.
+    """
     B = np.array([0.0, 0.0], float)
     C30 = np.array([-BC30_scale, 0.0], float)
 
@@ -105,6 +145,14 @@ def _te2_control_through_C10_at_half(C5: np.ndarray, C10: np.ndarray, C20: np.nd
     return 2.0 * C10 - 0.5 * (C5 + C20)
 
 def build_controls(lm: Dict[str, np.ndarray], u_AB: np.ndarray) -> Dict[str, np.ndarray]:
+    """Derive Bézier control points for leading and trailing edges.
+
+    The routine enforces geometric ordering constraints (e.g. TE1 ordering,
+    TE2 tangent below AB, TE3 control inside the C20–C30 span) and raises
+    ValueError when constraints cannot be satisfied. The returned dict is
+    directly consumable by `compute_2d_curves`.
+    """
+
     B, A, C5, C10, C20, C30 = lm["B"], lm["A"], lm["C5"], lm["C10"], lm["C20"], lm["C30"]
     BA = float(np.linalg.norm(A - B))
     n_left = rot_np(u_AB, math.radians(90.0))
@@ -161,7 +209,19 @@ def build_controls(lm: Dict[str, np.ndarray], u_AB: np.ndarray) -> Dict[str, np.
     x_lo = min(C20[0], C30[0]) - 1e-6
     x_hi = max(C20[0], C30[0]) + 1e-6
     if not (x_lo <= TE3_P1[0] <= x_hi):
-        raise ValueError("TE3_P1 must lie within x-span of segment C20–C30.")
+        # TE3_P1 fell outside the horizontal span of C20–C30. This can
+        # occur with noisy or extreme ratio inputs. Instead of failing,
+        # project TE3_P1 onto the C20–C30 segment (closest point) so the
+        # control remains well-formed and downstream reconstruction can
+        # proceed. If the segment is degenerate, preserve the original
+        # failure behavior.
+        seg_vec = (C30 - C20)
+        denom = float(np.dot(seg_vec, seg_vec))
+        if denom <= 1e-12:
+            raise ValueError("TE3_P1 must lie within x-span of segment C20–C30.")
+        tproj = float(np.dot(TE3_P1 - C20, seg_vec) / denom)
+        tproj_clamped = max(0.0, min(1.0, tproj))
+        TE3_P1 = C20 + tproj_clamped * seg_vec
 
     return {
         "LE_P0": LE_P0, "LE_P1": LE_P1, "LE_P2": LE_P2, "LE_P3": LE_P3,
@@ -171,6 +231,11 @@ def build_controls(lm: Dict[str, np.ndarray], u_AB: np.ndarray) -> Dict[str, np.
     }
 
 def compute_2d_curves(ctrl: Dict[str, np.ndarray], n: int = 900) -> Dict[str, np.ndarray]:
+    """Sample the provided Bézier control dictionary and return arrays.
+
+    Returns a dict containing sampled arrays for each segment plus an overall
+    `outline` array useful for plotting and area computations.
+    """
     t = np.linspace(0.0, 1.0, n)
     leading = bezier_cubic_np(ctrl["LE_P0"], ctrl["LE_P1"], ctrl["LE_P2"], ctrl["LE_P3"], t)
     te1 = bezier_cubic_np(ctrl["TE1_P0"], ctrl["TE1_P1"], ctrl["TE1_P2"], ctrl["TE1_P3"], t)

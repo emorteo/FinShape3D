@@ -1,0 +1,65 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+env.bak/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Installed package metadata (repo contains these directories)
+finshape3d.egg-info/
+UNKNOWN.egg-info/
+
+# Outputs and generated images/data
+FinShape3D_outputs/
+out/
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tif
+*.tiff
+*.pdf
+*.svg
+*.eps
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+*.swp
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs and env files
+*.log
+.env
+.env.*
+
+# Compiled extensions / caches
+*.so
+*.dylib
+
+tests/output/
