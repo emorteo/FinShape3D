@@ -2,7 +2,7 @@
 
 FinShape3D is a modular Python library and GUI toolkit for reconstructing dorsal-fin outlines and producing 3D wireframe visualisations from simple morphometric ratio tables. The repository contains the 2D GUI workflow and the core reconstruction library used to compute Bézier control points and 3D wireframes.
 
-Note: the standalone `finshape3d` CLI entrypoint may not be present in this checkout; use the GUI (`finshape2d.py`) or call the library functions directly (see "Programmatic usage" below).
+Note: the standalone `finshape3d` is not an entrypoint anymore; use the GUI (`finshape2d.py`) or call the library functions directly (see "Programmatic usage" below).
 
 ## Highlights
 - Modular `core/` package: `math`, `io`, `reconstruction`, `ui`.
